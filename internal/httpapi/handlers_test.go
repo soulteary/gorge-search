@@ -6,14 +6,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/soulteary/gorge-search/internal/config"
 	"github.com/soulteary/gorge-search/internal/engine"
 
 	"github.com/labstack/echo/v4"
 )
 
 func newTestDeps(token string) *Deps {
-	se := engine.New([]config.BackendDef{})
+	se := engine.New(nil)
 	return &Deps{Engine: se, Token: token}
 }
 

@@ -1,289 +1,202 @@
 package engine
 
 import (
-	"encoding/json"
+	"fmt"
 	"testing"
-
-	"github.com/soulteary/gorge-search/internal/config"
-	"github.com/soulteary/gorge-search/internal/esquery"
 )
 
-func TestNew_DefaultValues(t *testing.T) {
-	se := New([]config.BackendDef{
-		{
-			Type:  "elasticsearch",
-			Hosts: []string{"es:9200"},
-		},
-	})
+type mockBackend struct {
+	backendType string
+	roles       map[string]bool
+	docs        map[string]*Document
+	indexInited bool
+}
 
+func newMockBackend(roles ...string) *mockBackend {
+	m := &mockBackend{
+		backendType: "mock",
+		roles:       make(map[string]bool),
+		docs:        make(map[string]*Document),
+	}
+	for _, r := range roles {
+		m.roles[r] = true
+	}
+	if len(m.roles) == 0 {
+		m.roles["read"] = true
+		m.roles["write"] = true
+	}
+	return m
+}
+
+func (m *mockBackend) Type() string             { return m.backendType }
+func (m *mockBackend) HasRole(role string) bool { return m.roles[role] }
+
+func (m *mockBackend) IndexDocument(doc *Document) error {
+	m.docs[doc.PHID] = doc
+	return nil
+}
+
+func (m *mockBackend) Search(q *SearchQuery) ([]string, error) {
+	var phids []string
+	for phid := range m.docs {
+		phids = append(phids, phid)
+	}
+	return phids, nil
+}
+
+func (m *mockBackend) IndexExists() (bool, error) {
+	return m.indexInited, nil
+}
+
+func (m *mockBackend) InitIndex(_ []string) error {
+	m.indexInited = true
+	m.docs = make(map[string]*Document)
+	return nil
+}
+
+func (m *mockBackend) IndexStats() (map[string]any, error) {
+	return map[string]any{"documents": len(m.docs)}, nil
+}
+
+func (m *mockBackend) IndexIsSane(_ []string) (bool, error) {
+	return m.indexInited, nil
+}
+
+func (m *mockBackend) Info() map[string]any {
+	return map[string]any{"type": m.backendType}
+}
+
+func TestNew_WithBackends(t *testing.T) {
+	se := New([]SearchBackend{newMockBackend()})
 	if !se.HasBackends() {
 		t.Fatal("expected backends")
 	}
+}
 
-	b := se.backends[0]
-	if b.Index != "phabricator" {
-		t.Fatalf("expected index phabricator, got %s", b.Index)
-	}
-	if b.Version != 5 {
-		t.Fatalf("expected version 5, got %d", b.Version)
-	}
-	if b.Timeout != 15 {
-		t.Fatalf("expected timeout 15, got %d", b.Timeout)
-	}
-	if !b.Roles["read"] || !b.Roles["write"] {
-		t.Fatal("expected read+write roles by default")
+func TestNew_NoBackends(t *testing.T) {
+	se := New(nil)
+	if se.HasBackends() {
+		t.Fatal("expected no backends")
 	}
 }
 
-func TestBuildSearchSpec_BasicQuery(t *testing.T) {
-	b := &Backend{Version: 5}
-	q := &SearchQuery{
-		Query: "hello world",
-		Limit: 25,
-	}
-	spec := buildSearchSpec(b, q)
+func TestIndexDocument(t *testing.T) {
+	mb := newMockBackend("read", "write")
+	se := New([]SearchBackend{mb})
 
-	data, err := json.MarshalIndent(spec, "", "  ")
+	doc := &Document{PHID: "PHID-TASK-1", Type: "TASK", Title: "Test"}
+	if err := se.IndexDocument(doc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := mb.docs["PHID-TASK-1"]; !ok {
+		t.Fatal("document not indexed")
+	}
+}
+
+func TestSearch(t *testing.T) {
+	mb := newMockBackend("read", "write")
+	mb.docs["PHID-TASK-1"] = &Document{PHID: "PHID-TASK-1"}
+	se := New([]SearchBackend{mb})
+
+	phids, err := se.Search(&SearchQuery{Query: "test"})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	specStr := string(data)
-
-	if !jsonContains(specStr, `"simple_query_string"`) {
-		t.Fatal("expected simple_query_string in spec")
-	}
-	if !jsonContains(specStr, `"hello world"`) {
-		t.Fatal("expected query text in spec")
-	}
-	if !jsonContains(specStr, `"AND"`) {
-		t.Fatal("expected AND default_operator")
+	if len(phids) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(phids))
 	}
 }
 
-func TestBuildSearchSpec_NoQuery_MatchAll(t *testing.T) {
-	b := &Backend{Version: 5}
-	q := &SearchQuery{}
-	spec := buildSearchSpec(b, q)
+func TestSearch_NoReadableBackends(t *testing.T) {
+	mb := newMockBackend("write")
+	se := New([]SearchBackend{mb})
 
-	data, _ := json.Marshal(spec)
-	specStr := string(data)
-
-	if !jsonContains(specStr, `"match_all"`) {
-		t.Fatal("expected match_all for empty query")
-	}
-	if !jsonContains(specStr, `"dateCreated"`) {
-		t.Fatal("expected dateCreated sort for empty query")
+	_, err := se.Search(&SearchQuery{Query: "test"})
+	if err == nil {
+		t.Fatal("expected error for no readable backends")
 	}
 }
 
-func TestBuildSearchSpec_WithFilters(t *testing.T) {
-	b := &Backend{Version: 5}
-	q := &SearchQuery{
-		Query:       "test",
-		AuthorPHIDs: []string{"PHID-USER-1"},
-		Statuses:    []string{esquery.RelOpen},
-	}
-	spec := buildSearchSpec(b, q)
+func TestInitIndex(t *testing.T) {
+	mb := newMockBackend("read", "write")
+	se := New([]SearchBackend{mb})
 
-	data, _ := json.Marshal(spec)
-	specStr := string(data)
-
-	if !jsonContains(specStr, `"PHID-USER-1"`) {
-		t.Fatal("expected author PHID filter")
+	if err := se.InitIndex([]string{"TASK"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !jsonContains(specStr, `"open"`) {
-		t.Fatal("expected open status filter")
+	if !mb.indexInited {
+		t.Fatal("index not initialized")
 	}
 }
 
-func TestBuildSearchSpec_MaxOffset(t *testing.T) {
-	b := &Backend{Version: 5}
-	q := &SearchQuery{
-		Offset: 9999,
-		Limit:  100,
-	}
-	spec := buildSearchSpec(b, q)
+func TestIndexExists(t *testing.T) {
+	mb := newMockBackend("read", "write")
+	se := New([]SearchBackend{mb})
 
-	from, ok := spec["from"].(int)
-	if !ok {
-		t.Fatal("expected from to be int")
+	exists, err := se.IndexExists()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	size, ok := spec["size"].(int)
-	if !ok {
-		t.Fatal("expected size to be int")
-	}
-	if from+size > 10000 {
-		t.Fatalf("offset+limit exceeds 10000: %d+%d=%d", from, size, from+size)
-	}
-}
-
-func TestBuildDocSpec(t *testing.T) {
-	b := &Backend{Version: 5}
-	doc := &Document{
-		PHID:         "PHID-TASK-123",
-		Type:         "TASK",
-		Title:        "Test Task",
-		DateCreated:  1700000000,
-		DateModified: 1700000100,
-		Fields: []DocumentField{
-			{Name: "titl", Corpus: "Test Task"},
-			{Name: "body", Corpus: "Task body text"},
-		},
-		Relationships: []DocumentRelation{
-			{Name: "auth", RelatedPHID: "PHID-USER-1"},
-		},
+	if exists {
+		t.Fatal("expected index to not exist initially")
 	}
 
-	spec := buildDocSpec(b, doc)
-
-	if spec["title"] != "Test Task" {
-		t.Fatalf("expected title 'Test Task', got %v", spec["title"])
+	mb.indexInited = true
+	exists, err = se.IndexExists()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if spec["lastModified"] != int64(1700000100) {
-		t.Fatalf("expected lastModified 1700000100, got %v", spec["lastModified"])
-	}
-}
-
-func TestBuildIndexConfig(t *testing.T) {
-	b := &Backend{Version: 5}
-	cfg := buildIndexConfig(b, []string{"TASK", "DREV"})
-
-	settings, ok := cfg["settings"].(map[string]any)
-	if !ok {
-		t.Fatal("missing settings")
-	}
-	indexSettings, ok := settings["index"].(map[string]any)
-	if !ok {
-		t.Fatal("missing index settings")
-	}
-	analysis, ok := indexSettings["analysis"].(map[string]any)
-	if !ok {
-		t.Fatal("missing analysis")
-	}
-	analyzers, ok := analysis["analyzer"].(map[string]any)
-	if !ok {
-		t.Fatal("missing analyzers")
-	}
-	if _, ok := analyzers["english_exact"]; !ok {
-		t.Fatal("missing english_exact analyzer")
-	}
-
-	mappings, ok := cfg["mappings"].(map[string]any)
-	if !ok {
-		t.Fatal("missing mappings")
-	}
-	if _, ok := mappings["TASK"]; !ok {
-		t.Fatal("missing TASK mapping")
-	}
-	if _, ok := mappings["DREV"]; !ok {
-		t.Fatal("missing DREV mapping")
-	}
-}
-
-func TestConfigDeepMatch(t *testing.T) {
-	actual := map[string]any{
-		"settings": map[string]any{
-			"index": map[string]any{
-				"auto_expand_replicas": "0-2",
-				"number_of_shards":     "1",
-			},
-		},
-		"mappings": map[string]any{
-			"TASK": map[string]any{
-				"properties": map[string]any{
-					"titl": map[string]any{"type": "text"},
-				},
-			},
-		},
-	}
-
-	required := map[string]any{
-		"settings": map[string]any{
-			"index": map[string]any{
-				"auto_expand_replicas": "0-2",
-			},
-		},
-	}
-
-	if !configDeepMatch(actual, required) {
-		t.Fatal("expected match when required is subset of actual")
-	}
-
-	requiredBad := map[string]any{
-		"settings": map[string]any{
-			"index": map[string]any{
-				"auto_expand_replicas": "1-3",
-			},
-		},
-	}
-	if configDeepMatch(actual, requiredBad) {
-		t.Fatal("expected no match when values differ")
-	}
-
-	requiredMissing := map[string]any{
-		"settings": map[string]any{
-			"index": map[string]any{
-				"nonexistent_key": "value",
-			},
-		},
-	}
-	if configDeepMatch(actual, requiredMissing) {
-		t.Fatal("expected no match when key is missing from actual")
-	}
-
-	requiredAll := map[string]any{
-		"_all": map[string]any{"enabled": true},
-	}
-	if !configDeepMatch(actual, requiredAll) {
-		t.Fatal("expected _all key to be skipped")
-	}
-}
-
-func TestNormalizeConfigValue(t *testing.T) {
-	if normalizeConfigValue(true) != "true" {
-		t.Fatal("expected true -> 'true'")
-	}
-	if normalizeConfigValue(false) != "false" {
-		t.Fatal("expected false -> 'false'")
-	}
-	if normalizeConfigValue("hello") != "hello" {
-		t.Fatal("expected string passthrough")
-	}
-	if normalizeConfigValue(float64(5)) != "5" {
-		t.Fatal("expected float64(5) -> '5'")
+	if !exists {
+		t.Fatal("expected index to exist after init")
 	}
 }
 
 func TestBackendInfo(t *testing.T) {
-	se := New([]config.BackendDef{
-		{
-			Type:  "elasticsearch",
-			Hosts: []string{"es:9200"},
-			Roles: []string{"read", "write"},
-		},
-	})
+	mb := newMockBackend("read", "write")
+	se := New([]SearchBackend{mb})
+
 	info := se.BackendInfo()
 	if len(info) != 1 {
 		t.Fatalf("expected 1 backend info, got %d", len(info))
 	}
-	if info[0]["type"] != "elasticsearch" {
-		t.Fatalf("expected type elasticsearch, got %v", info[0]["type"])
+	if info[0]["type"] != "mock" {
+		t.Fatalf("expected type mock, got %v", info[0]["type"])
 	}
 }
 
-func jsonContains(s, substr string) bool {
-	return len(s) > 0 && contains(s, substr)
-}
+func TestMultipleBackends_Failover(t *testing.T) {
+	failing := &failingBackend{roles: map[string]bool{"read": true}}
+	working := newMockBackend("read")
+	working.docs["PHID-TASK-1"] = &Document{PHID: "PHID-TASK-1"}
 
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && searchString(s, sub)
-}
-
-func searchString(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
+	se := New([]SearchBackend{failing, working})
+	phids, err := se.Search(&SearchQuery{Query: "test"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	return false
+	if len(phids) != 1 {
+		t.Fatalf("expected 1 result from failover, got %d", len(phids))
+	}
 }
+
+type failingBackend struct {
+	roles map[string]bool
+}
+
+func (f *failingBackend) Type() string             { return "failing" }
+func (f *failingBackend) HasRole(role string) bool { return f.roles[role] }
+func (f *failingBackend) IndexDocument(_ *Document) error {
+	return fmt.Errorf("always fails")
+}
+func (f *failingBackend) Search(_ *SearchQuery) ([]string, error) {
+	return nil, fmt.Errorf("always fails")
+}
+func (f *failingBackend) IndexExists() (bool, error) { return false, fmt.Errorf("always fails") }
+func (f *failingBackend) InitIndex(_ []string) error { return fmt.Errorf("always fails") }
+func (f *failingBackend) IndexStats() (map[string]any, error) {
+	return nil, fmt.Errorf("always fails")
+}
+func (f *failingBackend) IndexIsSane(_ []string) (bool, error) {
+	return false, fmt.Errorf("always fails")
+}
+func (f *failingBackend) Info() map[string]any { return map[string]any{"type": "failing"} }

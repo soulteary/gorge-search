@@ -21,6 +21,7 @@ type BackendDef struct {
 	Roles    []string `json:"roles"`
 	Timeout  int      `json:"timeout"`
 	Protocol string   `json:"protocol"`
+	APIKey   string   `json:"apiKey,omitempty"`
 }
 
 func LoadFromEnv() *Config {
@@ -57,6 +58,17 @@ func LoadFromFile(path string) (*Config, error) {
 }
 
 func buildBackendFromEnv() []BackendDef {
+	backendType := envStr("SEARCH_ENGINE", "")
+
+	switch backendType {
+	case "meilisearch":
+		return buildMeilisearchFromEnv()
+	default:
+		return buildElasticsearchFromEnv()
+	}
+}
+
+func buildElasticsearchFromEnv() []BackendDef {
 	host := envStr("ES_HOST", "")
 	if host == "" {
 		return nil
@@ -75,6 +87,25 @@ func buildBackendFromEnv() []BackendDef {
 			Version:  envInt("ES_VERSION", 5),
 			Timeout:  envInt("ES_TIMEOUT", 15),
 			Protocol: envStr("ES_PROTOCOL", "http"),
+			Roles:    []string{"read", "write"},
+		},
+	}
+}
+
+func buildMeilisearchFromEnv() []BackendDef {
+	host := envStr("MEILI_HOST", "")
+	if host == "" {
+		return nil
+	}
+
+	return []BackendDef{
+		{
+			Type:     "meilisearch",
+			Hosts:    []string{host},
+			Index:    envStr("MEILI_INDEX", "phabricator"),
+			APIKey:   envStr("MEILI_MASTER_KEY", ""),
+			Timeout:  envInt("MEILI_TIMEOUT", 15),
+			Protocol: envStr("MEILI_PROTOCOL", "http"),
 			Roles:    []string{"read", "write"},
 		},
 	}

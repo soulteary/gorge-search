@@ -7,6 +7,8 @@ import (
 
 	"github.com/soulteary/gorge-search/internal/config"
 	"github.com/soulteary/gorge-search/internal/engine"
+	"github.com/soulteary/gorge-search/internal/engine/elasticsearch"
+	"github.com/soulteary/gorge-search/internal/engine/meilisearch"
 	"github.com/soulteary/gorge-search/internal/httpapi"
 
 	"github.com/labstack/echo/v4"
@@ -27,7 +29,8 @@ func main() {
 		cfg = config.LoadFromEnv()
 	}
 
-	se := engine.New(cfg.Backends)
+	backends := buildBackends(cfg.Backends)
+	se := engine.New(backends)
 
 	if !se.HasBackends() {
 		log.Println("warning: no search backends configured; search operations will fail until backends are added")
@@ -49,4 +52,17 @@ func main() {
 	})
 
 	e.Logger.Fatal(e.Start(cfg.ListenAddr))
+}
+
+func buildBackends(defs []config.BackendDef) []engine.SearchBackend {
+	var backends []engine.SearchBackend
+	for _, d := range defs {
+		switch d.Type {
+		case "meilisearch":
+			backends = append(backends, meilisearch.New(d))
+		default:
+			backends = append(backends, elasticsearch.New(d))
+		}
+	}
+	return backends
 }
