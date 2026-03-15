@@ -465,7 +465,7 @@ func (se *SearchEngine) doRequestRead(b *Backend, host, url, method string, body
 		b.markHealth(host, false)
 		return nil, fmt.Errorf("elasticsearch request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
