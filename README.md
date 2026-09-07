@@ -1,3 +1,6 @@
+项目合并至 https://github.com/soulteary/gorge 
+---
+
 # gorge-search
 
 Go 全文搜索代理服务，为 Phorge 提供统一的全文搜索 HTTP API。作为 PHP 应用与搜索引擎之间的代理层，将 Phorge 的文档索引和查询请求转发到 Elasticsearch 或 Meilisearch 后端，支持多后端读写分离和自动故障转移。
